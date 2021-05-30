@@ -577,8 +577,8 @@ void twoPhaseMixtureERzetaF<BasicTurbulenceModel>::correct()
     volScalarField& omegag = this->omega_;
     volScalarField& zetag = this->zeta_;
     volScalarField& fg = this->f_;
-    //volScalarField& epsilong = this->epsilon_;
     volScalarField& nutg = this->nut_;
+    volScalarField DomegaEffg(this->DomegaEff());
 
     // Local references to liquid-phase properties
     twoPhaseMixtureERzetaF<BasicTurbulenceModel>& liquidTurbulence = this->liquidTurbulence();
@@ -589,13 +589,16 @@ void twoPhaseMixtureERzetaF<BasicTurbulenceModel>::correct()
     volScalarField& omegal = liquidTurbulence.omega_;
     volScalarField& zetal = liquidTurbulence.zeta_;
     volScalarField& fl = liquidTurbulence.f_;
-    //volScalarField& epsilonl = liquidTurbulence.epsilon_;
     volScalarField& nutl = liquidTurbulence.nut_;
+    volScalarField DomegaEffl(liquidTurbulence.DomegaEff());
 
     // Local references to mixture properties
     volScalarField& rhom = rhom_();
     volScalarField& km = km_();
-    //volScalarField& epsilonm = epsilonm_();
+    volScalarField& omegam = omegam_();
+
+    volScalarField DomegaEffm(mixU(DomegaEffl,DomegaEffg)); // Effective mixture diffusivity for omega
+
 
     fv::options& fvOptions(fv::options::New(this->mesh_));
 
@@ -604,22 +607,94 @@ void twoPhaseMixtureERzetaF<BasicTurbulenceModel>::correct()
     // Update the effective mixture density
     rhom = this->rhom();
 
+    //Mixture effective vescosity
+
+    // Local references to mixture properties
+
+    //volScalarField& omegam = omegam_();
+
+
+    //volScalaField nutg(liquidTurbulence.DomegaEff());
+
     // Mixture flux
     surfaceScalarField phim("phim", mixFlux(phil, phig));
 
-    // Mixture velocity divergence
-    volScalarField divUm
-    (
-        mixU
-        (
-            fvc::div(fvc::absolute(phil, Ul)),
-            fvc::div(fvc::absolute(phig, Ug))
-        )
-    );
+    // *******************************************************************************************************************
+    // *******************************************************************************************************************
+
+    //                                         Source terms omegaEqn + omegaEqn
+
+    // *******************************************************************************************************************
+    // *******************************************************************************************************************
+
+    // Production term
 
     const volTensorField gradUl(fvc::grad(Ul));
     const volScalarField S2l(2*magSqr(dev(symm(gradUl))));
-    const volScalarField Gl(this->GName(), nutl*S2l);
+    const volScalarField Gl(liquidTurbulence.GName(), nutl*S2l);
+
+    const volTensorField gradUg(fvc::grad(Ug));
+    const volScalarField S2g(2*magSqr(dev(symm(gradUg))));
+    const volScalarField Gg(this->GName(), nutg*S2g);
+
+    const volScalarField COmega1l("COmega1l",(1.4*(1.0 + (0.012/(zetal+zetaMin_))))-1);
+    const volScalarField COmega1g("COmega1l",(1.4*(1.0 + (0.012/(zetag+zetaMin_))))-1);
+    const volScalarField Pomegam(mix(COmega1l*omegal*Gl/kl,COmega1g*omegag*Gg/kg)); // omega production term for mixture
+
+    // Cross-diffusion term term
+
+    volScalarField CDvl("CDvl", (2.0/kl*liquidTurbulence.nu()/sigmaCDv_*(fvc::grad(kl)&fvc::grad(omegal)))/omegal);
+    volScalarField CDtl("CDtl", (2.0/kl*nutl/sigmaCDt_*(fvc::grad(kl)&fvc::grad(omegal)))/omegal);
+    volScalarField CDl("CDl", CDvl+max(CDtl,dimensionedScalar("0.0", dimless/dimTime, 0.0)));
+
+    volScalarField CDvg("CDvg", (2.0/kg*this->nu()/sigmaCDv_*(fvc::grad(kg)&fvc::grad(omegag)))/omegag);
+    volScalarField CDtg("CDtg", (2.0/kg*nutg/sigmaCDt_*(fvc::grad(kg)&fvc::grad(omegag)))/omegag);
+    volScalarField CDg("CDg", CDvg+max(CDtg,dimensionedScalar("0.0", dimless/dimTime, 0.0)));
+
+    volScalarField CDm(mix(CDl,CDg));
+
+    // Psas term
+
+    dimensionedScalar Psaslim("Psaslim", dimensionSet(0, 0, -2, 0, 0), 0.0);
+
+    volScalarField T1l = 40.0*1.775*0.41*mag(fvc::laplacian(Ul))*sqrt(kl);
+    volScalarField T2l = 3.0*kl*max(pow(omegal,-2.0)*(fvc::grad(omegal) & fvc::grad(omegal)), pow(kl,-2.0)*(fvc::grad(kl) & fvc::grad(kl)));
+    volScalarField Psasl = max(0.003*(T1l - CT2_*T2l), Psaslim);
+
+    volScalarField T1g = 40.0*1.775*0.41*mag(fvc::laplacian(Ug))*sqrt(kg);
+    volScalarField T2g = 3.0*kg*max(pow(omegag,-2.0)*(fvc::grad(omegag) & fvc::grad(omegag)), pow(kg,-2.0)*(fvc::grad(kg) & fvc::grad(kg)));
+    volScalarField Psasg = max(0.003*(T1g - CT2_*T2g), Psaslim);
+
+    volScalarField Psasm(mix(Psasl,Psasg));
+
+    // omega equation
+    tmp<fvScalarMatrix> omegaEqn
+    (
+        fvm::ddt(omegam)
+      + fvm::div(phim, omegam)
+      + fvm::SuSp(-fvc::div(phim), omegam)
+      - fvm::laplacian(DomegaEffm, omegam)
+      ==
+        Pomegam
+      - fvm::SuSp(COmega2_*omegam, omegam) // From the work of Behzadi (2001), this is valid
+      + fvm::Sp(CDm, omegam)
+      + Csas_*Psasm
+    );
+
+    omegaEqn.ref().relax();
+    fvOptions.constrain(omegaEqn.ref());
+
+    #include "wallTreatmentOmega.H"
+
+    solve(omegaEqn);
+    fvOptions.correct(omega_);
+    bound(omegam, this->omegaMin_);
+
+
+
+
+
+
     /*
     const volScalarField Tl(this->Tau());
     const volScalarField Ll(this->L());

@@ -169,7 +169,6 @@ protected:
             autoPtr<volScalarField> Ct2_;
             autoPtr<volScalarField> rhom_;
             autoPtr<volScalarField> km_;
-            //autoPtr<volScalarField> epsilonm_;
             autoPtr<volScalarField> omegam_;
             autoPtr<volScalarField> zetam_;
             autoPtr<volScalarField> deltam_;
